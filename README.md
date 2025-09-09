@@ -83,7 +83,7 @@
 - `netsh set dnsservers` 語法修正：`name="介面" source=static address=<IP> register=primary`。
 - 可一次列出整段可用 IP，不再只顯示 50 筆。
 
-### v1.0.1 — 啟動/權限與打包
+### v1.0.1 — 啟動/權限
 - 加入權限偵測與自動提權（`ShellExecuteW runas`），非系統管理員時給出明確提示。
 
 ### v1.0.0 — 初版
