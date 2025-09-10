@@ -1,7 +1,7 @@
-# IP_Scan_Set_CLI v1.0.4
+# Automatic_Internet_tool
 
 ## 執行方式
-1. 以系統管理員身分執行：雙擊 **IP_Scan_Set_CLI v1.0.4.exe**（或右鍵→以系統管理員執行）。
+1. 以系統管理員身分執行：雙擊 **Automatic_Internet_tool v1.0.4.exe**（或右鍵→以系統管理員執行）。
 
 > 註：需管理員權限才能套用/還原網路設定與進行預測試（暫掛 IP、寫入臨時路由）。
 
