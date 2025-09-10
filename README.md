@@ -99,12 +99,10 @@
 
 ### `targets.txt`（可選）
 - 放在 EXE 同資料夾。  
-- 每行一個目標：
-  ```txt
+- 每行一個目標：txt
   proxy.company.local:8080 公司Proxy
   203.66.181.1:443 公司出口FW
   1.1.1.1:443 Cloudflare
-````
 
 * 主機名會用網卡 DNS 解析成 IP 後測試。
 * 建議加入公司 Proxy 或可直連的內外部 IP\:Port。
@@ -150,9 +148,3 @@
 * 互動式選擇 IP，套用靜態設定（原先 DNS 固定 8.8.8.8）。
 * 提供 `--list-iface`、`--dhcp`、`--workers`、`--timeout-ms`。
 * 簡單外網檢查（ping 8.8.8.8 / [www.google.com）。](http://www.google.com）。)
-
-```
-
----
-
-```
