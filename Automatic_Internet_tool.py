@@ -9,15 +9,22 @@ import sys
 import os
 from datetime import datetime
 
-STATUS_ZH = {"FAIL": "失敗", "OCCU": "佔用", "PASS": "可用"}
+# 狀態定義（中文）
+STATUS_ZH = {
+    "FREE": "可用",
+    "OCCU": "已佔用",
+    "LAN_OK": "內網可通",
+    "WAN_OK": "可上網",
+    "FAIL": "不通"
+}
 
 # 可調常數
 DEFAULT_MASK = "255.255.255.0"
 DEFAULT_GW_LAST = 254
 DEFAULT_TIMEOUT_MS = 800
 DEFAULT_WORKERS = 64
-PRETEST_MODE = "gateway_only"   # 可選: gateway_only / internet / mixed / none
-PRETEST_LIMIT = 2        # mixed / internet 模式下最多測幾個目標
+PRETEST_MODE = "mixed"   # 可選: gateway_only / internet / mixed / none
+PRETEST_LIMIT = 2        # internet/mixed 模式下最多測幾個目標
 INCLUDE_WIFI = True
 PRETEST_TARGETS = [
     ("8.8.8.8", 53, "8.8.8.8:53 DNS"),
@@ -141,6 +148,17 @@ def list_nics():
             names.append(alias)
     return names
 
+def set_static(ip: str, mask: str, gateway: str, iface: str) -> str:
+    cmd = f'netsh interface ipv4 set address name="{iface}" source=static address={ip} mask={mask} gateway={gateway} gwmetric=1'
+    return run_cmdline(cmd)
+
+def set_dns(primary: str, secondary: str, iface: str):
+    o1 = run_cmdline(f'netsh interface ipv4 set dnsservers name="{iface}" source=static address={primary} register=primary validate=yes')
+    o2 = ""
+    if secondary:
+        o2 = run_cmdline(f'netsh interface ipv4 add dnsservers name="{iface}" address={secondary} index=2 validate=yes')
+    return o1, o2
+
 def choose_iface_interactively():
     nics = list_nics()
     if not nics:
@@ -162,17 +180,6 @@ def choose_iface_interactively():
         return s
     print("名稱不在清單中")
     return None
-
-def set_static(ip: str, mask: str, gateway: str, iface: str) -> str:
-    cmd = f'netsh interface ipv4 set address name="{iface}" source=static address={ip} mask={mask} gateway={gateway} gwmetric=1'
-    return run_cmdline(cmd)
-
-def set_dns(primary: str, secondary: str, iface: str):
-    o1 = run_cmdline(f'netsh interface ipv4 set dnsservers name="{iface}" source=static address={primary} register=primary validate=yes')
-    o2 = ""
-    if secondary:
-        o2 = run_cmdline(f'netsh interface ipv4 add dnsservers name="{iface}" address={secondary} index=2 validate=yes')
-    return o1, o2
 
 def add_ip_alias(iface: str, ip: str, mask: str):
     return run_cmdline(f'netsh interface ipv4 add address name="{iface}" address={ip} mask={mask}')
@@ -222,96 +229,43 @@ def tcp_connect_from(src_ip: str, dst_ip: str, port: int, timeout_ms: int) -> bo
             pass
         return False
 
-def resolve_host(host: str):
-    try:
-        return socket.gethostbyname(host)
-    except Exception:
-        return None
-
 def build_test_targets():
-    targets = list(PRETEST_TARGETS)
-    extra = []
-    base_dir = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else sys.argv[0])
-    path = os.path.join(base_dir, "targets.txt")
-    if os.path.isfile(path):
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split(None, 1)
-                hp = parts[0]
-                label = parts[1] if len(parts) > 1 else hp
-                if hp.count(":") != 1:
-                    continue
-                host, port = hp.split(":")
-                if not port.isdigit():
-                    continue
-                port = int(port)
-                try:
-                    socket.inet_aton(host)
-                    extra.append((host, port, label))
-                except Exception:
-                    ip = resolve_host(host)
-                    if ip:
-                        extra.append((ip, port, label))
-    seen = set()
-    merged = []
-    for ip, port, label in targets + extra:
-        key = f"{ip}:{port}"
-        if key not in seen:
-            seen.add(key)
-            merged.append((ip, port, label))
-    return merged
+    return list(PRETEST_TARGETS)
 
-def pretest_one_ip(test_ip: str, mask: str, gateway: str, iface: str, mode: str, timeout_ms: int):
+def pretest_one_ip(test_ip: str, mask: str, gateway: str, iface: str, timeout_ms: int):
+    """先測內網，再測外網，回傳 (狀態, 內網可通?, 外網可通?)"""
     add_ip_alias(iface, test_ip, mask)
     try:
         if_index = get_if_index(iface)
         if if_index is None:
-            return False, "IFINDEX_FAIL"
+            return STATUS_ZH["FAIL"], False, False
 
-        if mode == "gateway_only":
-            return (ping_once(gateway, timeout_ms), "GW_PING")
+        # 內網檢查：能否 ping gateway
+        lan_ok = ping_once(gateway, timeout_ms)
+        if not lan_ok:
+            return STATUS_ZH["FREE"], False, False
 
-        if mode == "internet":
-            targets = build_test_targets()
-            tested = 0
-            for dst, port, label in targets:
-                add_host_route(dst, gateway, if_index)
-                try:
-                    ok = tcp_connect_from(test_ip, dst, port, timeout_ms)
-                finally:
-                    del_host_route(dst, if_index)
-                tested += 1
-                if ok:
-                    return True, label
-                if PRETEST_LIMIT and tested >= PRETEST_LIMIT:
-                    break
-            return False, "INET_FAIL"
+        # 外網檢查
+        wan_ok = False
+        targets = build_test_targets()
+        tested = 0
+        for dst, port, label in targets:
+            add_host_route(dst, gateway, if_index)
+            try:
+                ok = tcp_connect_from(test_ip, dst, port, timeout_ms)
+            finally:
+                del_host_route(dst, if_index)
+            tested += 1
+            if ok:
+                wan_ok = True
+                break
+            if PRETEST_LIMIT and tested >= PRETEST_LIMIT:
+                break
 
-        if mode == "mixed":
-            if not ping_once(gateway, timeout_ms):
-                return False, "GW_FAIL"
-            targets = build_test_targets()
-            tested = 0
-            for dst, port, label in targets:
-                add_host_route(dst, gateway, if_index)
-                try:
-                    ok = tcp_connect_from(test_ip, dst, port, timeout_ms)
-                finally:
-                    del_host_route(dst, if_index)
-                tested += 1
-                if ok:
-                    return True, f"MIXED_OK ({label})"
-                if PRETEST_LIMIT and tested >= PRETEST_LIMIT:
-                    break
-            return False, "MIXED_INET_FAIL"
-
-        if mode == "none":
-            return True, "SKIP"
-
-        return False, "MODE_ERR"
+        if wan_ok:
+            return STATUS_ZH["WAN_OK"], True, True
+        else:
+            return STATUS_ZH["LAN_OK"], True, False
 
     finally:
         del_ip_alias(iface, test_ip)
@@ -342,7 +296,6 @@ def main():
         return
 
     if not is_admin():
-        # 還不是 Admin → 嘗試提權
         if relaunch_elevated_new_console():
             return
         print("請以系統管理員身分執行再重試。")
@@ -351,7 +304,6 @@ def main():
 
     TIMEOUT_MS = DEFAULT_TIMEOUT_MS
     WORKERS = DEFAULT_WORKERS
-
     iface = choose_iface_interactively()
     if not iface:
         wait_at_end()
@@ -366,67 +318,63 @@ def main():
 
         used, free = scan_subnet_range(net_prefix, 2, 253, TIMEOUT_MS, WORKERS, exclude=exclude)
 
+        # 表頭
+        print("\nIP 位址            使用狀態   內網   外網")
+        print("----------------------------------------------")
+
+        all_results = []
         for ip in used:
-            print(f"  {ip}: {STATUS_ZH['OCCU']}")
+            all_results.append((ip, STATUS_ZH["OCCU"], True, None))
+            print(f"{ip:16} {STATUS_ZH['OCCU']:<6}  ✔     -")
 
         passed = []
-        fail_count = 0
-
         for ip in free:
-            ok, label = pretest_one_ip(ip, DEFAULT_MASK, gateway, iface, PRETEST_MODE, TIMEOUT_MS)
-            if ok:
-                print(f"  {ip}: {STATUS_ZH['PASS']}（通過 {label}）")
+            status, lan_ok, wan_ok = pretest_one_ip(ip, DEFAULT_MASK, gateway, iface, TIMEOUT_MS)
+            all_results.append((ip, status, lan_ok, wan_ok))
+            lan_str = "✔" if lan_ok else "✘"
+            wan_str = "✔" if wan_ok else "✘"
+            print(f"{ip:16} {status:<6}  {lan_str}     {wan_str}")
+            if status in (STATUS_ZH["LAN_OK"], STATUS_ZH["WAN_OK"]):
                 passed.append(ip)
-            else:
-                print(f"  {ip}: {STATUS_ZH['FAIL']}（原因 {label}）")
-                fail_count += 1
 
         print("\n統計：")
-        print(f"  佔用：{len(used)}")
-        print(f"  失敗：{fail_count}")
-        print(f"  可用：{len(passed)}")
+        print(f"  已佔用：{len(used)}")
+        print(f"  可用/內網：{len([r for r in all_results if r[1]==STATUS_ZH['LAN_OK']])}")
+        print(f"  可上網：{len([r for r in all_results if r[1]==STATUS_ZH['WAN_OK']])}")
+        print(f"  完全不通：{len([r for r in all_results if r[1]==STATUS_ZH['FAIL']])}")
 
         if passed:
             print(f"\n此網段發現 {len(passed)} 個『可用』IP。")
             for i, ip in enumerate(passed, 1):
                 print(f"{i:3d}. {ip}")
 
-            sel = input("\n請輸入要套用的『編號或完整IP』（直接 Enter 取消設定）：").strip()
-            chosen = None
-            if sel:
-                if sel.isdigit():
-                    idx = int(sel)
-                    if 1 <= idx <= len(passed):
-                        chosen = passed[idx - 1]
+            sel = input("\n請輸入要套用的『編號』（直接 Enter 取消設定）：").strip()
+            if sel.isdigit():
+                idx = int(sel)
+                if 1 <= idx <= len(passed):
+                    chosen = passed[idx - 1]
+                    print(f"\n正在套用 IP {chosen} ...")
+                    print(set_static(chosen, DEFAULT_MASK, gateway, iface))
+                    o1, o2 = set_dns("8.8.8.8", "1.1.1.1", iface)
+                    if o1.strip():
+                        print(o1.strip())
+                    if o2.strip():
+                        print(o2.strip())
+                    print("套用完成。")
+                    wait_at_end()
+                    return
                 else:
-                    if is_valid_host_in_segment(sel, net_prefix):
-                        if sel in passed:
-                            chosen = sel
-                        else:
-                            print(f"\n你輸入的 {sel} 不在可用清單，先做一次預測試確認...")
-                            ok, label = pretest_one_ip(sel, DEFAULT_MASK, gateway, iface, PRETEST_MODE, TIMEOUT_MS)
-                            if ok:
-                                chosen = sel
-                            else:
-                                print(f"預測試失敗（原因 {label}），不套用。")
+                    print("輸入編號超出範圍，取消設定。")
+            else:
+                print("未輸入有效編號，取消設定。")
 
-            if chosen:
-                print(f"\n正在套用 IP {chosen} ...")
-                print(set_static(chosen, DEFAULT_MASK, gateway, iface))
-                o1, o2 = set_dns("8.8.8.8", "1.1.1.1", iface)
-                if o1.strip():
-                    print(o1.strip())
-                if o2.strip():
-                    print(o2.strip())
-                print("套用完成。")
+        else:
+            print("\n此網段沒有『可用』IP。")
 
+        ans = input("\n是否要改掃其他網段？(y/n)：").strip().lower()
+        if ans != "y":
             wait_at_end()
             return
-        else:
-            ans = input("\n此網段沒有『可用』IP，是否要改掃其他網段？(y/n)：").strip().lower()
-            if ans != "y":
-                wait_at_end()
-                return
 
 if __name__ == "__main__":
     try:
